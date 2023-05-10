@@ -1,8 +1,6 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
-import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
-import { Contract, ContractFactory } from "ethers";
+import { config, ethers } from "hardhat";
+import { reset, loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 
 import {
   tAddr,
@@ -16,64 +14,57 @@ import {
 } from "./constants";
 
 describe("ProxyLogicV2", function () {
-  let acc1: SignerWithAddress;
-  let t: Contract;
-  let council: SignerWithAddress;
-  let ProxyLogicV1: ContractFactory;
-  let ProxyLogicV2: ContractFactory;
-  let futureRewards: Contract;
-  let claimableRewards: Contract;
+  const amount = 1000;
 
-  before(async function () {
-    t = await ethers.getContractAt("IERC20", tAddr);
-    [acc1] = await ethers.getSigners();
-    council = await ethers.getImpersonatedSigner(councilAddr);
-    ProxyLogicV1 = await ethers.getContractFactory("ProxyLogicV1");
-    ProxyLogicV2 = await ethers.getContractFactory("ProxyLogicV2");
-    claimableRewards = await ethers.getContractAt(
+  async function getAccountsAndContracts() {
+    const t = await ethers.getContractAt("IERC20", tAddr);
+    const [acc1] = await ethers.getSigners();
+    const council = await ethers.getImpersonatedSigner(councilAddr);
+    const ProxyLogicV1 = await ethers.getContractFactory("ProxyLogicV1");
+    const ProxyLogicV2 = await ethers.getContractFactory("ProxyLogicV2");
+    const claimableRewards = await ethers.getContractAt(
       dsProxyABI,
       claimableRewardsProxyAddr
     );
-    futureRewards = await ethers.getContractAt(
+    const futureRewards = await ethers.getContractAt(
       dsProxyABI,
       futureRewardsProxyAddr
     );
-  });
 
-  async function approveClaimableRewardsSpendingFutureRewardsTFixture() {
-    const amount = 1000;
-
-    const callDataV1 = ProxyLogicV1.interface.encodeFunctionData(
+    // First, future rewards proxy must approve the spent of the T rewards by
+    // claimable rewards proxy
+    const callData = ProxyLogicV1.interface.encodeFunctionData(
       "approveT(address,uint256)",
       [claimableRewards.address, amount]
     );
 
     await futureRewards
       .connect(council)
-      ["execute(address,bytes)"](proxyLogicV1Addr, callDataV1, {
+      ["execute(address,bytes)"](proxyLogicV1Addr, callData, {
         gasLimit: 100000,
       });
+
+    return {
+      t,
+      acc1,
+      council,
+      ProxyLogicV1,
+      ProxyLogicV2,
+      claimableRewards,
+      futureRewards,
+    };
   }
 
-  it("Should not top up if T is not approved", async function () {
-    const amount = 1000;
-
-    const callData = ProxyLogicV2.interface.encodeFunctionData(
-      "topUpClaimableRewards(uint256)",
-      [amount]
+  before(async function () {
+    await reset(
+      config.networks.hardhat.forking?.url,
+      config.networks.hardhat.forking?.blockNumber
     );
-
-    await expect(
-      claimableRewards
-        .connect(council)
-        ["execute(address,bytes)"](proxyLogicV2Addr, callData, {
-          gasLimit: 100000,
-        })
-    ).to.be.reverted;
   });
 
   it("Should top up if T spent is previously approved", async function () {
-    const amount = 1000;
+    const { t, council, ProxyLogicV2, futureRewards, claimableRewards } =
+      await loadFixture(getAccountsAndContracts);
 
     const futureRewardsBalBefore = await t.balanceOf(futureRewards.address);
     const claimableRewardsBalBefore = await t.balanceOf(
@@ -84,20 +75,14 @@ describe("ProxyLogicV2", function () {
       merkleDistAddr
     );
 
-    // First future rewards proxy must approve the spent of the T rewards by
-    // claimable rewards proxy
-    await loadFixture(approveClaimableRewardsSpendingFutureRewardsTFixture);
-
-    // Now that claimable rewards proxy can spent future rewards T, we can call
-    // topUpClaimableRewards() method
-    const callDataV2 = ProxyLogicV2.interface.encodeFunctionData(
+    const callData = ProxyLogicV2.interface.encodeFunctionData(
       "topUpClaimableRewards(uint256)",
       [amount]
     );
 
     await claimableRewards
       .connect(council)
-      ["execute(address,bytes)"](proxyLogicV2Addr, callDataV2, {
+      ["execute(address,bytes)"](proxyLogicV2Addr, callData, {
         gasLimit: 100000,
       });
 
@@ -122,30 +107,32 @@ describe("ProxyLogicV2", function () {
   });
 
   it("Should revert if top up amount is zero", async function () {
-    const amount = 0;
+    const topUpAmount = 0;
 
-    await loadFixture(approveClaimableRewardsSpendingFutureRewardsTFixture);
+    const { council, ProxyLogicV2, claimableRewards } = await loadFixture(
+      getAccountsAndContracts
+    );
 
-    const callDataV2 = ProxyLogicV2.interface.encodeFunctionData(
+    const callData = ProxyLogicV2.interface.encodeFunctionData(
       "topUpClaimableRewards(uint256)",
-      [amount]
+      [topUpAmount]
     );
 
     await expect(
       claimableRewards
         .connect(council)
-        ["execute(address,bytes)"](proxyLogicV2Addr, callDataV2, {
+        ["execute(address,bytes)"](proxyLogicV2Addr, callData, {
           gasLimit: 100000,
         })
     ).to.be.reverted;
   });
 
   it("Should not top up with an external account", async function () {
-    const amount = 1000;
+    const { acc1, ProxyLogicV2, claimableRewards } = await loadFixture(
+      getAccountsAndContracts
+    );
 
-    await loadFixture(approveClaimableRewardsSpendingFutureRewardsTFixture);
-
-    const callDataV2 = ProxyLogicV2.interface.encodeFunctionData(
+    const callData = ProxyLogicV2.interface.encodeFunctionData(
       "topUpClaimableRewards(uint256)",
       [amount]
     );
@@ -153,19 +140,56 @@ describe("ProxyLogicV2", function () {
     await expect(
       claimableRewards
         .connect(acc1)
-        ["execute(address,bytes)"](proxyLogicV2Addr, callDataV2, {
+        ["execute(address,bytes)"](proxyLogicV2Addr, callData, {
           gasLimit: 100000,
         })
     ).to.be.reverted;
   });
 
   it("Should not top up if insufficient T approved", async function () {
-    // Amount approved in the following fixture is 1000
-    const amount = 5000;
+    const { council, ProxyLogicV2, claimableRewards } = await loadFixture(
+      getAccountsAndContracts
+    );
 
-    await loadFixture(approveClaimableRewardsSpendingFutureRewardsTFixture);
+    // Amount actually approved is 1000
+    const topUpAmount = 5000;
 
-    const callDataV2 = ProxyLogicV2.interface.encodeFunctionData(
+    const callData = ProxyLogicV2.interface.encodeFunctionData(
+      "topUpClaimableRewards(uint256)",
+      [topUpAmount]
+    );
+
+    await expect(
+      claimableRewards
+        .connect(council)
+        ["execute(address,bytes)"](proxyLogicV2Addr, callData, {
+          gasLimit: 100000,
+        })
+    ).to.be.reverted;
+  });
+
+  it("Should not top up if T is not approved", async function () {
+    const {
+      council,
+      ProxyLogicV1,
+      ProxyLogicV2,
+      claimableRewards,
+      futureRewards,
+    } = await loadFixture(getAccountsAndContracts);
+
+    // Fixture set the allowance to 1000T. Let's set back the allowance to 0
+    const callDataV1 = ProxyLogicV1.interface.encodeFunctionData(
+      "approveT(address,uint256)",
+      [claimableRewards.address, 0]
+    );
+
+    await futureRewards
+      .connect(council)
+      ["execute(address,bytes)"](proxyLogicV1Addr, callDataV1, {
+        gasLimit: 100000,
+      });
+
+    const callData = ProxyLogicV2.interface.encodeFunctionData(
       "topUpClaimableRewards(uint256)",
       [amount]
     );
@@ -173,7 +197,7 @@ describe("ProxyLogicV2", function () {
     await expect(
       claimableRewards
         .connect(council)
-        ["execute(address,bytes)"](proxyLogicV2Addr, callDataV2, {
+        ["execute(address,bytes)"](proxyLogicV2Addr, callData, {
           gasLimit: 100000,
         })
     ).to.be.reverted;
